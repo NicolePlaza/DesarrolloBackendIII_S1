@@ -13,18 +13,21 @@ import org.springframework.batch.infrastructure.item.database.JpaItemWriter;
 import org.springframework.batch.infrastructure.item.database.builder.JpaItemWriterBuilder;
 import org.springframework.batch.infrastructure.item.file.FlatFileItemReader;
 import org.springframework.batch.infrastructure.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.infrastructure.item.support.SynchronizedItemStreamReader;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
 
 @Configuration
 public class InteresesBatchConfig {
 
     @Bean
-    public FlatFileItemReader<CuentaInteres> interesReader() {
+    public FlatFileItemReader<CuentaInteres> interesFileReader() {
         return new FlatFileItemReaderBuilder<CuentaInteres>()
-                .name("interesReader")
+                .name("interesFileReader")
                 .resource(new ClassPathResource("data/intereses.csv"))
                 .linesToSkip(1)
                 .delimited()
@@ -42,6 +45,11 @@ public class InteresesBatchConfig {
     }
 
     @Bean
+    public SynchronizedItemStreamReader<CuentaInteres> interesReader() {
+        return new SynchronizedItemStreamReader<>(interesFileReader());
+    }
+
+    @Bean
     public InteresProcessor interesProcessor() {
         return new InteresProcessor();
     }
@@ -54,19 +62,31 @@ public class InteresesBatchConfig {
     }
 
     @Bean
+    public TaskExecutor interesTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(3);
+        executor.setMaxPoolSize(3);
+        executor.setThreadNamePrefix("interes-hilo-");
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
     public Step interesStep(JobRepository jobRepository,
                              PlatformTransactionManager tx,
-                             FlatFileItemReader<CuentaInteres> interesReader,
+                             SynchronizedItemStreamReader<CuentaInteres> interesReader,
                              InteresProcessor interesProcessor,
-                             JpaItemWriter<CuentaInteres> interesWriter) {
+                             JpaItemWriter<CuentaInteres> interesWriter,
+                             TaskExecutor interesTaskExecutor) {
         return new StepBuilder("interesStep", jobRepository)
-                .<CuentaInteres, CuentaInteres>chunk(10, tx)
+                .<CuentaInteres, CuentaInteres>chunk(5, tx)
                 .reader(interesReader)
                 .processor(interesProcessor)
                 .writer(interesWriter)
                 .faultTolerant()
                 .skipLimit(50)
                 .skip(Exception.class)
+                .taskExecutor(interesTaskExecutor)
                 .build();
     }
 

@@ -18,18 +18,21 @@ import org.springframework.batch.infrastructure.item.database.JpaItemWriter;
 import org.springframework.batch.infrastructure.item.database.builder.JpaItemWriterBuilder;
 import org.springframework.batch.infrastructure.item.file.FlatFileItemReader;
 import org.springframework.batch.infrastructure.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.infrastructure.item.support.SynchronizedItemStreamReader;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
 
 @Configuration
 public class CuentasAnualesBatchConfig {
 
     @Bean
-    public FlatFileItemReader<MovimientoAnual> movimientoReader() {
+    public FlatFileItemReader<MovimientoAnual> movimientoFileReader() {
         return new FlatFileItemReaderBuilder<MovimientoAnual>()
-                .name("movimientoReader")
+                .name("movimientoFileReader")
                 .resource(new ClassPathResource("data/cuentas_anuales.csv"))
                 .linesToSkip(1)
                 .delimited()
@@ -54,6 +57,11 @@ public class CuentasAnualesBatchConfig {
     }
 
     @Bean
+    public SynchronizedItemStreamReader<MovimientoAnual> movimientoReader() {
+        return new SynchronizedItemStreamReader<>(movimientoFileReader());
+    }
+
+    @Bean
     public MovimientoProcessor movimientoProcessor() {
         return new MovimientoProcessor();
     }
@@ -66,19 +74,31 @@ public class CuentasAnualesBatchConfig {
     }
 
     @Bean
+    public TaskExecutor movimientoTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(3);
+        executor.setMaxPoolSize(3);
+        executor.setThreadNamePrefix("movimiento-hilo-");
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
     public Step movimientoStep(JobRepository jobRepository,
                                 PlatformTransactionManager tx,
-                                FlatFileItemReader<MovimientoAnual> movimientoReader,
+                                SynchronizedItemStreamReader<MovimientoAnual> movimientoReader,
                                 MovimientoProcessor movimientoProcessor,
-                                JpaItemWriter<MovimientoAnual> movimientoWriter) {
+                                JpaItemWriter<MovimientoAnual> movimientoWriter,
+                                TaskExecutor movimientoTaskExecutor) {
         return new StepBuilder("movimientoStep", jobRepository)
-                .<MovimientoAnual, MovimientoAnual>chunk(10, tx)
+                .<MovimientoAnual, MovimientoAnual>chunk(5, tx)
                 .reader(movimientoReader)
                 .processor(movimientoProcessor)
                 .writer(movimientoWriter)
                 .faultTolerant()
                 .skipLimit(50)
                 .skip(Exception.class)
+                .taskExecutor(movimientoTaskExecutor)
                 .build();
     }
 
@@ -94,6 +114,8 @@ public class CuentasAnualesBatchConfig {
                 .build();
     }
 
+    // Sin paralelismo: InformeAnualReader agrega datos ya persistidos con una sola query JPQL,
+    // no hay lectura de archivo que se beneficie de un pool de hilos.
     @Bean
     public Step informeAnualStep(JobRepository jobRepository,
                                   PlatformTransactionManager tx,
