@@ -1,0 +1,117 @@
+package com.banco.batch.config;
+
+import com.banco.batch.model.EstadoCuentaAnual;
+import com.banco.batch.model.MovimientoAnual;
+import com.banco.batch.processor.MovimientoProcessor;
+import com.banco.batch.reader.InformeAnualReader;
+import jakarta.persistence.EntityManagerFactory;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import org.springframework.batch.core.job.Job;
+import org.springframework.batch.core.step.Step;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.job.parameters.RunIdIncrementer;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.infrastructure.item.database.JpaItemWriter;
+import org.springframework.batch.infrastructure.item.database.builder.JpaItemWriterBuilder;
+import org.springframework.batch.infrastructure.item.file.FlatFileItemReader;
+import org.springframework.batch.infrastructure.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.transaction.PlatformTransactionManager;
+
+@Configuration
+public class CuentasAnualesBatchConfig {
+
+    @Bean
+    public FlatFileItemReader<MovimientoAnual> movimientoReader() {
+        return new FlatFileItemReaderBuilder<MovimientoAnual>()
+                .name("movimientoReader")
+                .resource(new ClassPathResource("data/cuentas_anuales.csv"))
+                .linesToSkip(1)
+                .delimited()
+                .names("cuenta_id", "fecha", "transaccion", "monto", "descripcion")
+                .fieldSetMapper(fieldSet -> {
+                    MovimientoAnual m = new MovimientoAnual();
+                    m.setCuentaId(fieldSet.readLong("cuenta_id"));
+                    String fechaStr = fieldSet.readString("fecha");
+                    LocalDate fecha;
+                    try {
+                        fecha = LocalDate.parse(fechaStr);
+                    } catch (DateTimeParseException e) {
+                        fecha = LocalDate.parse(fechaStr, DateTimeFormatter.ofPattern("yyyy/MM/dd"));
+                    }
+                    m.setFecha(fecha);
+                    m.setTransaccion(fieldSet.readString("transaccion"));
+                    m.setMonto(fieldSet.readDouble("monto"));
+                    m.setDescripcion(fieldSet.readString("descripcion"));
+                    return m;
+                })
+                .build();
+    }
+
+    @Bean
+    public MovimientoProcessor movimientoProcessor() {
+        return new MovimientoProcessor();
+    }
+
+    @Bean
+    public JpaItemWriter<MovimientoAnual> movimientoWriter(EntityManagerFactory emf) {
+        return new JpaItemWriterBuilder<MovimientoAnual>()
+                .entityManagerFactory(emf)
+                .build();
+    }
+
+    @Bean
+    public Step movimientoStep(JobRepository jobRepository,
+                                PlatformTransactionManager tx,
+                                FlatFileItemReader<MovimientoAnual> movimientoReader,
+                                MovimientoProcessor movimientoProcessor,
+                                JpaItemWriter<MovimientoAnual> movimientoWriter) {
+        return new StepBuilder("movimientoStep", jobRepository)
+                .<MovimientoAnual, MovimientoAnual>chunk(10, tx)
+                .reader(movimientoReader)
+                .processor(movimientoProcessor)
+                .writer(movimientoWriter)
+                .faultTolerant()
+                .skipLimit(50)
+                .skip(Exception.class)
+                .build();
+    }
+
+    @Bean
+    public InformeAnualReader informeAnualReader(EntityManagerFactory emf) {
+        return new InformeAnualReader(emf);
+    }
+
+    @Bean
+    public JpaItemWriter<EstadoCuentaAnual> informeAnualWriter(EntityManagerFactory emf) {
+        return new JpaItemWriterBuilder<EstadoCuentaAnual>()
+                .entityManagerFactory(emf)
+                .build();
+    }
+
+    @Bean
+    public Step informeAnualStep(JobRepository jobRepository,
+                                  PlatformTransactionManager tx,
+                                  InformeAnualReader informeAnualReader,
+                                  JpaItemWriter<EstadoCuentaAnual> informeAnualWriter) {
+        return new StepBuilder("informeAnualStep", jobRepository)
+                .<EstadoCuentaAnual, EstadoCuentaAnual>chunk(10, tx)
+                .reader(informeAnualReader)
+                .writer(informeAnualWriter)
+                .build();
+    }
+
+    @Bean
+    public Job cuentasAnualesJob(JobRepository jobRepository, Step movimientoStep, Step informeAnualStep) {
+        return new JobBuilder("cuentasAnualesJob", jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(movimientoStep)
+                .next(informeAnualStep)
+                .build();
+    }
+}
