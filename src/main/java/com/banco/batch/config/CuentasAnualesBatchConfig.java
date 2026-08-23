@@ -1,5 +1,8 @@
 package com.banco.batch.config;
 
+import com.banco.batch.listener.LoggingJobExecutionListener;
+import com.banco.batch.listener.LoggingSkipListener;
+import com.banco.batch.listener.LoggingStepExecutionListener;
 import com.banco.batch.model.EstadoCuentaAnual;
 import com.banco.batch.model.MovimientoAnual;
 import com.banco.batch.processor.MovimientoProcessor;
@@ -85,12 +88,24 @@ public class CuentasAnualesBatchConfig {
     }
 
     @Bean
+    public LoggingSkipListener<MovimientoAnual, MovimientoAnual> movimientoSkipListener() {
+        return new LoggingSkipListener<>();
+    }
+
+    @Bean
+    public LoggingStepExecutionListener stepExecutionListener() {
+        return new LoggingStepExecutionListener();
+    }
+
+    @Bean
     public Step movimientoStep(JobRepository jobRepository,
                                 PlatformTransactionManager tx,
                                 SynchronizedItemStreamReader<MovimientoAnual> movimientoReader,
                                 MovimientoProcessor movimientoProcessor,
                                 JpaItemWriter<MovimientoAnual> movimientoWriter,
-                                TaskExecutor movimientoTaskExecutor) {
+                                TaskExecutor movimientoTaskExecutor,
+                                LoggingSkipListener<MovimientoAnual, MovimientoAnual> movimientoSkipListener,
+                                LoggingStepExecutionListener stepExecutionListener) {
         return new StepBuilder("movimientoStep", jobRepository)
                 .<MovimientoAnual, MovimientoAnual>chunk(5, tx)
                 .reader(movimientoReader)
@@ -102,6 +117,8 @@ public class CuentasAnualesBatchConfig {
                 .skipLimit(50)
                 .skip(Exception.class)
                 .taskExecutor(movimientoTaskExecutor)
+                .listener(movimientoSkipListener)
+                .listener(stepExecutionListener)
                 .build();
     }
 
@@ -123,18 +140,24 @@ public class CuentasAnualesBatchConfig {
     public Step informeAnualStep(JobRepository jobRepository,
                                   PlatformTransactionManager tx,
                                   InformeAnualReader informeAnualReader,
-                                  JpaItemWriter<EstadoCuentaAnual> informeAnualWriter) {
+                                  JpaItemWriter<EstadoCuentaAnual> informeAnualWriter,
+                                  LoggingStepExecutionListener stepExecutionListener) {
         return new StepBuilder("informeAnualStep", jobRepository)
                 .<EstadoCuentaAnual, EstadoCuentaAnual>chunk(10, tx)
                 .reader(informeAnualReader)
                 .writer(informeAnualWriter)
+                .listener(stepExecutionListener)
                 .build();
     }
 
     @Bean
-    public Job cuentasAnualesJob(JobRepository jobRepository, Step movimientoStep, Step informeAnualStep) {
+    public Job cuentasAnualesJob(JobRepository jobRepository,
+                                 Step movimientoStep,
+                                 Step informeAnualStep,
+                                 LoggingJobExecutionListener loggingJobExecutionListener) {
         return new JobBuilder("cuentasAnualesJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
+                .listener(loggingJobExecutionListener)
                 .start(movimientoStep)
                 .next(informeAnualStep)
                 .build();

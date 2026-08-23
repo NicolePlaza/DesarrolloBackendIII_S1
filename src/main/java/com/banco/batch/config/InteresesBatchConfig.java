@@ -1,5 +1,8 @@
 package com.banco.batch.config;
 
+import com.banco.batch.listener.LoggingJobExecutionListener;
+import com.banco.batch.listener.LoggingSkipListener;
+import com.banco.batch.listener.LoggingStepExecutionListener;
 import com.banco.batch.model.CuentaInteres;
 import com.banco.batch.processor.InteresProcessor;
 import jakarta.persistence.EntityManagerFactory;
@@ -73,12 +76,24 @@ public class InteresesBatchConfig {
     }
 
     @Bean
+    public LoggingSkipListener<CuentaInteres, CuentaInteres> interesSkipListener() {
+        return new LoggingSkipListener<>();
+    }
+
+    @Bean
+    public LoggingStepExecutionListener interesStepExecutionListener() {
+        return new LoggingStepExecutionListener();
+    }
+
+    @Bean
     public Step interesStep(JobRepository jobRepository,
                              PlatformTransactionManager tx,
                              SynchronizedItemStreamReader<CuentaInteres> interesReader,
                              InteresProcessor interesProcessor,
                              JpaItemWriter<CuentaInteres> interesWriter,
-                             TaskExecutor interesTaskExecutor) {
+                             TaskExecutor interesTaskExecutor,
+                             LoggingSkipListener<CuentaInteres, CuentaInteres> interesSkipListener,
+                             LoggingStepExecutionListener interesStepExecutionListener) {
         return new StepBuilder("interesStep", jobRepository)
                 .<CuentaInteres, CuentaInteres>chunk(5, tx)
                 .reader(interesReader)
@@ -90,13 +105,18 @@ public class InteresesBatchConfig {
                 .skipLimit(50)
                 .skip(Exception.class)
                 .taskExecutor(interesTaskExecutor)
+                .listener(interesSkipListener)
+                .listener(interesStepExecutionListener)
                 .build();
     }
 
     @Bean
-    public Job interesesJob(JobRepository jobRepository, Step interesStep) {
+    public Job interesesJob(JobRepository jobRepository,
+                            Step interesStep,
+                            LoggingJobExecutionListener loggingJobExecutionListener) {
         return new JobBuilder("interesesJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
+                .listener(loggingJobExecutionListener)
                 .start(interesStep)
                 .build();
     }

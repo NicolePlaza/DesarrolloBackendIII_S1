@@ -1,6 +1,9 @@
 package com.banco.batch.config;
 
 import com.banco.batch.decider.TransaccionResultadoDecider;
+import com.banco.batch.listener.LoggingJobExecutionListener;
+import com.banco.batch.listener.LoggingSkipListener;
+import com.banco.batch.listener.LoggingStepExecutionListener;
 import com.banco.batch.model.Transaccion;
 import com.banco.batch.policy.TransaccionSkipPolicy;
 import com.banco.batch.processor.TransaccionProcessor;
@@ -74,12 +77,29 @@ public class TransaccionesBatchConfig{
     }
 
     @Bean
+    public LoggingSkipListener<Transaccion, Transaccion> transaccionSkipListener() {
+        return new LoggingSkipListener<>();
+    }
+
+    @Bean
+    public LoggingStepExecutionListener transaccionStepExecutionListener() {
+        return new LoggingStepExecutionListener();
+    }
+
+    @Bean
+    public LoggingJobExecutionListener loggingJobExecutionListener() {
+        return new LoggingJobExecutionListener();
+    }
+
+    @Bean
     public Step transaccionStep(JobRepository jobRepository,
                                 PlatformTransactionManager tx,
                                 SynchronizedItemStreamReader<Transaccion> reader,
                                 TransaccionProcessor processor,
                                 JpaItemWriter<Transaccion> writer,
-                                TaskExecutor transaccionTaskExecutor) {
+                                TaskExecutor transaccionTaskExecutor,
+                                LoggingSkipListener<Transaccion, Transaccion> transaccionSkipListener,
+                                LoggingStepExecutionListener transaccionStepExecutionListener) {
         return new StepBuilder("transaccionStep", jobRepository)
                 .<Transaccion, Transaccion>chunk(5, tx)
                 .reader(reader)
@@ -90,9 +110,11 @@ public class TransaccionesBatchConfig{
                 .retry(TransientDataAccessException.class)
                 .skipPolicy(new TransaccionSkipPolicy())
                 .taskExecutor(transaccionTaskExecutor)
-                .build(); 
+                .listener(transaccionSkipListener)
+                .listener(transaccionStepExecutionListener)
+                .build();
     }
-    
+
     @Bean
     public TransaccionResultadoDecider transaccionResultadoDecider() {
         return new TransaccionResultadoDecider();
@@ -101,9 +123,11 @@ public class TransaccionesBatchConfig{
     @Bean
     public Job transaccionesJob(JobRepository jobRepository,
                                 Step transaccionStep,
-                                TransaccionResultadoDecider transaccionResultadoDecider) {
+                                TransaccionResultadoDecider transaccionResultadoDecider,
+                                LoggingJobExecutionListener loggingJobExecutionListener) {
         return new JobBuilder("transaccionesJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
+                .listener(loggingJobExecutionListener)
                 .start(transaccionStep)
                 .next(transaccionResultadoDecider)
                 .on("OK").end()
