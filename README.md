@@ -1,78 +1,96 @@
 # Migración de Procesos Batch – Banco XYZ
 
-Proyecto de la Experiencia 1 / Semana 1 de Desarrollo Backend III (PBY2203). Implementa con **Spring Batch** la migración de tres procesos batch legacy del "Banco XYZ": reporte de transacciones diarias, cálculo de intereses mensuales y generación de estados de cuenta anuales.
-
-## Objetivo
-
-Modernizar procesos batch legacy leyendo datos desde archivos CSV con errores típicos de sistemas antiguos (montos negativos o en cero, saldos vacíos, edades no válidas, registros duplicados), validarlos y transformarlos con `ItemProcessor`, y persistirlos en una base de datos relacional (MySQL).
-
-Los datos de origen provienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data).
+Migramos tres procesos batch legacy del Banco XYZ a Spring Batch: el reporte de transacciones diarias, el cálculo de intereses mensuales y la generación de estados de cuenta anuales. Los datos de origen (con los errores típicos de un sistema legacy: montos en cero, saldos vacíos, edades fuera de rango, duplicados) vienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data).
 
 ## Tecnologías
 
-- Java 17
-- Spring Boot 4.1.0 + Spring Batch
+- Java 17 (compila también con JDK 21/24, el bytecode target queda en 17)
+- Spring Boot 4.1.0 + Spring Batch 6.0.4
 - Spring Data JPA + Hibernate
 - MySQL 8 (vía Docker)
 - Maven
 
 ## Estructura del proyecto
 
-src/main/java/com/banco/batch/
-├── model/ -> Entidades JPA (Transaccion, CuentaInteres, MovimientoAnual, EstadoCuentaAnual)
-├── processor/ -> ItemProcessor de cada job (validación y transformación)
-├── reader/ -> Lector personalizado para el informe agregado de cuentas anuales
-├── config/ -> Configuración de cada Job (reader, processor, writer, steps)
-└── BatchApplication.java
+El código está organizado por responsabilidad dentro de `com.banco.batch`:
 
-src/main/resources/
-├── application.properties
-└── data/ -> CSVs de origen (transacciones, intereses, cuentas_anuales)
+- `model`: las entidades JPA (Transaccion, CuentaInteres, MovimientoAnual, EstadoCuentaAnual).
+- `processor`: el ItemProcessor de cada job, donde vive la validación y transformación de datos.
+- `reader`: el reader custom que arma el informe agregado de cuentas anuales.
+- `policy`: el SkipPolicy custom del job de transacciones.
+- `decider`: el JobExecutionDecider del job de transacciones.
+- `listener`: los listeners que loguean skips, steps y jobs.
+- `config`: la configuración de cada Job (reader, processor, writer, steps, paralelismo).
 
+Los recursos (`application.properties` y los CSV de entrada) están en `src/main/resources`.
 
-## Jobs implementados
+## Los 3 Jobs
 
-### 1. `transaccionesJob` – Reporte de Transacciones Diarias
-Lee `transacciones.csv`, descarta filas con monto nulo o en cero, normaliza el campo `tipo`, y persiste en la tabla `transacciones`.
+Cada proceso legacy quedó como un Job independiente con su propio Reader, Processor y Writer.
 
-### 2. `interesesJob` – Cálculo de Intereses Mensuales
-Lee `intereses.csv`, descarta cuentas con saldo vacío/cero/negativo, edades no válidas (fuera de 18-100 años) y registros duplicados. Calcula el saldo final aplicando una tasa de interés mensual según el tipo de cuenta (supuesto de negocio: ahorro 2%, préstamo 5%, hipoteca 3%) y persiste en `cuentas_interes`.
+`transaccionesJob` lee `transacciones.csv` con `TransaccionProcessor` y descarta las filas con monto nulo o en cero — por ejemplo, la fila `id=4` (monto 0) no pasa, mientras que la `id=3` (monto -200) sí, porque un débito negativo es un dato válido, no un error. El resultado se persiste en la tabla `transacciones` a través de un `JpaItemWriter`.
 
-### 3. `cuentasAnualesJob` – Estados de Cuenta Anuales
-Tiene dos steps:
-- `movimientoStep`: lee `cuentas_anuales.csv`, descarta movimientos con monto en cero o sin descripción/tipo de transacción, tolera fechas en formato `yyyy-MM-dd` o `yyyy/MM/dd`, y persiste cada movimiento en `movimientos_anuales`.
-- `informeAnualStep`: agrupa los movimientos por cuenta y genera el informe compilado (total ingresos, total egresos, saldo neto, cantidad de movimientos) en la tabla `estados_cuenta_anual`.
+`interesesJob` lee `intereses.csv` con `InteresProcessor`, que descarta cuentas con saldo nulo/cero/negativo, edades fuera de 18-100 años, tipo de cuenta desconocido o registros duplicados. La cuenta `104` se cae por tener saldo 0, y la `106` por ser un duplicado exacto de la `101` (mismo nombre, saldo, edad y tipo). Las que pasan reciben su interés según el tipo de cuenta (ahorro 2%, préstamo 5%, hipoteca 3%) y quedan en `cuentas_interes`.
 
-## Manejo de errores
+`cuentasAnualesJob` tiene dos steps. `movimientoStep` lee `cuentas_anuales.csv` con `MovimientoProcessor`, tolera fechas en dos formatos distintos y descarta movimientos sin descripción/tipo o con monto en cero (como la fila de la cuenta `107`), guardando lo válido en `movimientos_anuales`. `informeAnualStep` no toca el CSV: usa un reader propio (`InformeAnualReader`) que agrupa por cuenta los movimientos ya guardados y arma el resumen anual en `estados_cuenta_anual`.
 
-Todos los steps usan `.faultTolerant().skipLimit(50).skip(Exception.class)`, de forma que un registro con datos inválidos se descarta sin detener el job completo. Cada `ItemProcessor` además aplica reglas de negocio explícitas (montos, saldos, edades, duplicados) antes de dejar pasar un registro al writer.
+## Escalamiento y procesamiento paralelo
+
+Los tres steps de lectura (`transaccionStep`, `interesStep`, `movimientoStep`) corren en paralelo con 3 hilos (`ThreadPoolTaskExecutor`, `corePoolSize=3`, `maxPoolSize=3`, `queueCapacity=10`) y chunks de tamaño 5. El reader de cada uno está envuelto en `SynchronizedItemStreamReader` porque `FlatFileItemReader` no es thread-safe por sí solo.
+
+`informeAnualStep` queda fuera de este esquema a propósito: es una agregación con una sola consulta JPQL sobre datos ya persistidos, no hay lectura de archivo que se beneficie de varios hilos.
+
+## Tolerancia a fallos
+
+Usamos dos mecanismos distintos, para dos tipos de error distintos:
+
+- **SkipPolicy** (omisión de datos inválidos): en `transaccionesJob` hay un `TransaccionSkipPolicy` custom que permite hasta 20 omisiones, solo para errores de parseo/formato. En `interesesJob` y `cuentasAnualesJob` se usa `skipLimit(50).skip(Exception.class)`.
+- **RetryPolicy** (fallos transitorios de infraestructura): los tres steps reintentan hasta 3 veces ante un `TransientDataAccessException` (por ejemplo, un deadlock momentáneo de MySQL). A diferencia del skip, esto no descarta el dato — reintenta la misma operación porque el error no depende del contenido del registro.
+
+## Control de finalización
+
+`transaccionesJob` termina de forma distinta según cuántos registros se saltearon en `transaccionStep`, a través de un `JobExecutionDecider` (`TransaccionResultadoDecider`):
+
+- 0 omisiones → el job termina normal (`OK`).
+- 1 a 5 omisiones → termina con advertencia (`COMPLETED WITH WARNINGS`).
+- Más de 5 omisiones → el job se marca como fallido (`CRITICO`), para forzar una revisión manual del archivo fuente.
+
+No implementamos un reintento automático de todo el step (como en algunos ejemplos de la guía) porque acá el origen es un CSV estático: si el step falla por datos malos, correrlo de nuevo produce el mismo resultado, no es un fallo transitorio.
+
+## Listeners y logging
+
+Cada step de lectura tiene un `SkipListener` que registra en log (nivel WARN) cada registro que se descarta y por qué, y un `StepExecutionListener` que loguea al terminar el step cuántos registros se leyeron, escribieron y saltaron, y cuánto tardó. Cada Job tiene además un `JobExecutionListener` que loguea el inicio y el resultado final. Esto es lo que revisamos para confirmar qué se leyó, qué se transformó y qué quedó persistido en cada corrida.
 
 ## Cómo ejecutar
 
 ### Prerrequisitos
-- Java 17
+- Java 17 (o superior; el proyecto compila con JDK 21/24 también)
 - Docker
 
 ### 1. Levantar la base de datos
 
+```
 docker run --name banco-mysql -e MYSQL_ROOT_PASSWORD=NuevaClave123 -e MYSQL_DATABASE=banco_xyz -p 3306:3306 -d mysql:8
+```
 
+Si el contenedor ya existe, alcanza con `docker start banco-mysql`. La configuración de conexión está en `src/main/resources/application.properties` (usuario `root`, misma contraseña que arriba, base `banco_xyz`); las tablas se crean solas (`spring.jpa.hibernate.ddl-auto=update`).
 
 ### 2. Compilar
 
+```
 ./mvnw clean install
-
+```
 
 ### 3. Ejecutar cada Job
 
+```
 ./mvnw spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.name=transaccionesJob"
 ./mvnw spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.name=interesesJob"
 ./mvnw spring-boot:run "-Dspring-boot.run.arguments=--spring.batch.job.name=cuentasAnualesJob"
+```
 
+Cada job usa `RunIdIncrementer`, así que se puede correr las veces que quieras sin que Spring Batch se queje de una instancia ya completada — eso sí, significa que si un job falla a mitad de camino, la próxima corrida no retoma desde ahí, arranca de cero con un `run.id` nuevo. Lo dejamos así a propósito para poder repetir las pruebas libremente; la capacidad de Spring Batch de reanudar un job fallido sigue disponible de fondo (el estado se persiste en MySQL vía `JobRepository`), solo que no la estamos usando con parámetros fijos.
 
-Las tablas se crean automáticamente (`spring.jpa.hibernate.ddl-auto=update`), no requieren pasos manuales adicionales.
+## Evidencia de ejecución
 
-## Integrantes
-
-- Nicole Plaza
-- Camila González
+La evidencia de ejecución (logs y capturas de cada Job corriendo) se entrega en un documento aparte dentro de la carpeta del grupo.
