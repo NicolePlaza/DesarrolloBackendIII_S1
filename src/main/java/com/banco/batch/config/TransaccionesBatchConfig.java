@@ -1,5 +1,6 @@
 package com.banco.batch.config;
 
+import com.banco.batch.decider.TransaccionResultadoDecider;
 import com.banco.batch.model.Transaccion;
 import com.banco.batch.policy.TransaccionSkipPolicy;
 import com.banco.batch.processor.TransaccionProcessor;
@@ -93,10 +94,22 @@ public class TransaccionesBatchConfig{
     }
     
     @Bean
-    public Job transaccionesJob(JobRepository jobRepository, Step transaccionStep) {
+    public TransaccionResultadoDecider transaccionResultadoDecider() {
+        return new TransaccionResultadoDecider();
+    }
+
+    @Bean
+    public Job transaccionesJob(JobRepository jobRepository,
+                                Step transaccionStep,
+                                TransaccionResultadoDecider transaccionResultadoDecider) {
         return new JobBuilder("transaccionesJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
                 .start(transaccionStep)
+                .next(transaccionResultadoDecider)
+                .on("OK").end()
+                .from(transaccionResultadoDecider).on("ADVERTENCIA").end("COMPLETED WITH WARNINGS")
+                .from(transaccionResultadoDecider).on("CRITICO").fail()
+                .end()
                 .build();
-    }    
+    }
 }
