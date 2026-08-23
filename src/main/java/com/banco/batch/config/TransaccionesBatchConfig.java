@@ -72,6 +72,9 @@ public class TransaccionesBatchConfig{
         executor.setCorePoolSize(3);
         executor.setMaxPoolSize(3);
         executor.setThreadNamePrefix("transaccion-hilo-");
+        // Con 3 hilos fijos y chunks de 5, una cola de 10 absorbe picos sin crecer sin límite,
+        // acorde al volumen de datos de este proyecto (archivos CSV pequeños).
+        executor.setQueueCapacity(10);
         executor.initialize();
         return executor;
     }
